@@ -1,23 +1,179 @@
 ---
-title: Hacking The Cloud
-description: The encyclopedia for offensive security in the cloud
-hide:
-    - toc
+author_name: Nick Frichette
+title: Misconfigured Resource-Based Policies
+description: Common misconfigurations of resource-based policies and how they can be abused.
 ---
 
-# Home
-Hacking the cloud is an encyclopedia of the attacks/tactics/techniques that offensive security professionals can use on their next cloud exploitation adventure. The goal is to share this knowledge with the security community to better defend cloud native technologies.
+Resource-based policies are an often overlooked part of AWS security that can have significant implications. A [resource-based policy](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_identity-vs-resource.html) is a type of policy that is **attached directly to an AWS resource that describes what actions can be performed on it and by whom**. 
 
-All content on this site is created by volunteers. If you'd like to be one of them, you can contribute your knowledge by submitting a [Pull Request](https://github.com/Hacking-the-Cloud/hackingthe.cloud/pulls). We are open to content from any major cloud provider and will also accept cloud-related technologies as well (Docker, Terraform, K8s, etc.). Additionally you are encouraged to update/modify/improve existing pages as well.
+For example, the following is a [bucket policy](https://docs.aws.amazon.com/AmazonS3/latest/userguide/example-bucket-policies.html) (a type of resource-based policy) that would permit the `tester` user to list the contents of the `super-public-fun-bucket` S3 bucket.
 
-Topics can include offensive techniques, tools, general knowledge related to cloud security, etc. **Defensive knowledge is also welcome!** At the end of the day the primary goal is to make the cloud safer, and defenders are welcome to submit content all the same.
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowS3Listing",
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::111111111111:user/tester"
+            },
+            "Action": "s3:ListBucket",
+            "Resource": "arn:aws:s3:::super-public-fun-bucket"
+        }
+    ]
+}
+```
 
-Don't worry about submitting content in the wrong format or what section it should be a part of, we can always make improvements later :) When writing content about a technique identified by a researcher, credit the researcher who discovered it and link to their site/talk.
+Resource-based policies make it easy to share AWS resources across AWS accounts. They also, as a result, make it easy to unintentionally share resources. The common [example](https://www.theregister.com/2020/08/03/leaky_s3_buckets/) of this is misconfigured S3 buckets which leak sensitive information. 
 
-## Contributing
-If you'd like to contribute to the site, please see our [contributing page](https://github.com/Hacking-the-Cloud/hackingthe.cloud/blob/main/CONTRIBUTING.md). Anything helps! An article, a paragraph, or even a fix for a grammar mistake.
+For a Penetration Tester or Red Teamer it is important to understand the intricacies of how resource-based policies work, and how they can be abused.
 
-Please checkout the [GitHub page](https://github.com/Hacking-the-Cloud/hackingthe.cloud) for more!
+## The “*” Principal and Risks
 
-## Disclaimer
-The information provided by Hacking the Cloud is intended to be used by professionals who are authorized to perform security assessments or by those defending cloud environments. While these techniques can be used to avoid detection, escalate privileges, compromise resources, etc. the intent is to improve security by making the knowledge of these techniques more generally available.
+In a resource-based policy you must specify a “[principal](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_principal.html#Principal_specifying)”. This is the entity who is allowed (or denied) the ability to perform the action. It is possible to specify “\*” [as a principal](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_principal.html#principal-anonymous) which means that all users will be able to act on it. **This effectively makes the resource public and anyone can perform actions against it**.
+
+For a real world example of this, a [telecommunications company](https://www.twilio.com/blog/incident-report-taskrouter-js-sdk-july-2020) had the following bucket policy set.
+
+```json
+{
+  "Sid": "AllowPublicRead",
+  "Effect": "Allow",
+  "Principal": {
+    "AWS": "*"
+  },
+  "Action": [
+    "s3:GetObject",
+    "s3:PutObject"
+  ],
+  "Resource": "arn:aws:s3:::media.tellacom.com/taskrouter/*"
+}
+```
+
+The bucket this policy was attached to was used to distribute a JavaScript SDK, which would be a valid use-case for a public S3 bucket. As can be seen from the `Action` statement, the policy permitted both `s3:GetObject` and `s3:PutObject`. This enabled an attacker to overwrite the JavaScript SDK sitting in the bucket with malicious code. This code was then distributed from the legitimate bucket.
+
+While resource-based policy misconfigurations are often associated with leaking information (read), **it is equally as dangerous that an adversary could modify (write to) the resource(s)**.
+
+!!! Note
+    [Condition operators](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_condition_operators.html) can be used to scope down the policy. For example, the principal can be set to “\*” but the conditions can enforce which account can perform an action. It is important to thoroughly read the policy and understand the context before creating a finding for it. 
+
+## More Than Just S3 Buckets
+
+It is worth noting that there are [many different AWS services/resources](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_aws-services-that-work-with-iam.html) which make use of resource-based policies. Each service will have its own security implications based on what the principal is and what the actions are. 
+
+!!! Note
+    [Prowler](https://github.com/prowler-cloud/prowler), an AWS assessment tool, can be used to quickly audit resource policies in an AWS account. Be mindful that it cannot contextualize all [condition operators](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_condition_operators.html), and how they affect the account’s security.
+
+## Resource-Based Policy Evaluation Logic
+
+It is important to note that resource-based policies have a unique quirk when it comes to policy evaluation logic. From the [documentation](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html#policy-eval-denyallow), “**Depending on the type of principal, an Allow in a resource-based policy can result in a final decision of Allow, even if an implicit deny in an identity-based policy, permissions boundary, or session policy is present [within the same account]**”.
+
+!!! Note
+    An `implicit` deny is when there is no specific `Deny` statement, but there is also no `Allow` statement in a policy. You can think of an implicit deny as the starting point of a policy. Everything is denied by default and access has to be granted.
+
+    An `explicit` deny is when there is a specific `Deny` statement in a policy. 
+
+    More information can be found in the documentation for [the difference between explicit and implicit denies](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html#AccessPolicyLanguage_Interplay).
+
+This means that if there is an `Allow` in a resource policy, that entity can perform actions on the resource without an associated identity policy. Take the following [SNS](https://aws.amazon.com/sns/) topic access policy (a form of resource-based policy) for example:
+
+```json
+{
+  "Version": "2008-10-17",
+  "Id": "__default_policy_ID",
+  "Statement": [
+    {
+      "Sid": "__default_statement_ID",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::111111111111:user/tester"
+      },
+      "Action": [
+        "SNS:GetTopicAttributes",
+        "SNS:SetTopicAttributes"
+      ],
+      "Resource": "arn:aws:sns:us-east-1:111111111111:test_topic"
+    }
+  ]
+}
+```
+This policy would permit the `tester` IAM user to perform `sns:GetTopicAttributes` and `sns:SetTopicAttributes` without the need for an `Allow` in the identity policies attached to the user.
+
+!!! Note
+    This behavior only applies to entities in the same AWS account. If the resource-based policy specified an IAM user in a different AWS account, that user would need to have an identity policy attached that allowed the action.
+
+## “Not” Policy Elements
+
+Within the syntax for IAM policies in AWS exist three “Not” policy elements, [NotPrincipal](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_notprincipal.html), [NotAction](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_notaction.html), and [NotResource](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_notresource.html). These elements have the inverse effect of their similarly named counterparts and, when paired with an `Allow`, can be a very serious misconfiguration.
+
+Because of this, policies which include these elements should be strictly scrutinized for potential misconfigurations.
+
+### NotPrincipal
+
+The [NotPrincipal](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_notprincipal.html) element is used to specify which entity is not a part of the policy. When paired with an `Allow` this means that **all entities (including those outside of the account) will be permitted to perform actions against the resource**.
+
+For example, the following SNS access policy would permit any entity to perform `sns:GetTopicAttributes` except for the `jim` user.
+
+```json
+{
+  "Version": "2008-10-17",
+  "Id": "__default_policy_ID",
+  "Statement": [
+    {
+      "Sid": "__default_statement_ID",
+      "Effect": "Allow",
+      "NotPrincipal": {
+        "AWS": "arn:aws:iam::111111111111:user/jim"
+      },
+      "Action": "SNS:GetTopicAttributes",
+      "Resource": "arn:aws:sns:us-east-1:111111111111:test_topic"
+    }
+  ]
+}
+```
+
+### NotAction
+The [NotAction](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_notaction.html) element is used to specify all actions **except** the specified one. When paired with an `Allow` this means that **all actions except the ones specified will be permitted**. 
+
+For example, the following SNS access policy would permit any entity the ability to perform all SNS actions except `sns:Publish`.
+
+```json
+{
+  "Version": "2008-10-17",
+  "Id": "__default_policy_ID",
+  "Statement": [
+    {
+      "Sid": "__default_statement_ID",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "*"
+      },
+      "NotAction": "SNS:Publish",
+      "Resource": "arn:aws:sns:us-east-1:111111111111:test_topic"
+    }
+  ]
+}
+``` 
+
+### NotResource
+The [NotResource](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_notresource.html) element is used to specify all resources **except** the specified one. When paired with an `Allow` this means that **if the resource is incorrect, or mistyped, the statement will evaluate to true**.
+
+For example, the following SNS access policy for an SNS topic named `first_topic` would permit the user `jim` the ability to perform the `sns:GetTopicAttributes` action because the statement specifies a `NotResource` element of `second_topic`.
+
+```json
+{
+  "Version": "2008-10-17",
+  "Id": "__default_policy_ID",
+  "Statement": [
+    {
+      "Sid": "__default_statement_ID",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::222222222222:user/jim"
+      },
+      "Action": "SNS:GetTopicAttributes",
+      "NotResource": "arn:aws:sns:us-east-1:111111111111:second_topic"
+    }
+  ]
+}
+```
